@@ -86,6 +86,8 @@ class ContractComparison:
     rename_candidates: dict[str, str]
     field_changes: list[ContractFieldChange]
     is_breaking_candidate: bool
+    before_raw_content: str = ""
+    after_raw_content: str = ""
 
 
 @dataclass

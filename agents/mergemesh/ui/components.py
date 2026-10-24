@@ -8,7 +8,7 @@ from config.settings import AppSettings, ProviderReadiness
 from domain.models import AnalysisReport, Finding, TestExecutionResult
 
 
-def render_header(settings: AppSettings, run_status: str) -> None:
+def render_header(settings: AppSettings, run_status: str, input_mode: str = "simulated_fixture") -> None:
     """Render the top MergeMesh identity header and status pills."""
     mode_labels = {
         "local": f"AI Mode: Local Gemma ({settings.ollama_model})",
@@ -17,6 +17,11 @@ def render_header(settings: AppSettings, run_status: str) -> None:
         "hybrid": f"AI Mode: Local Gemma ({settings.ollama_model})",
     }
     ai_badge_text = mode_labels.get(settings.ai_mode, f"Mode: {settings.ai_mode}")
+    input_badge_text = (
+        "Input: Local Git Repositories"
+        if input_mode == "local_git_repos"
+        else "Input: Bundled PR Fixtures"
+    )
 
     status_class = "mm-badge-info"
     if "Fallback" in run_status or "Warn" in run_status:
@@ -34,7 +39,7 @@ def render_header(settings: AppSettings, run_status: str) -> None:
                 <div class="mm-subtitle">Catch cross-repository failures before merge — Deterministic contract analysis &amp; executable compatibility evidence</div>
             </div>
             <div class="mm-badge-row">
-                <span class="mm-badge mm-badge-fixture" title="Preloaded local repository fixtures; no live GitHub network calls">Input: Simulated PR Fixtures</span>
+                <span class="mm-badge mm-badge-fixture">{input_badge_text}</span>
                 <span class="mm-badge mm-badge-info">{ai_badge_text}</span>
                 <span class="mm-badge {status_class}">Status: {run_status}</span>
             </div>
@@ -66,15 +71,18 @@ def render_dependency_graph(report: AnalysisReport) -> None:
     except Exception:
         pass
 
-    edge_badge = (
-        '<span class="mm-badge mm-badge-fail">BREAKING MISMATCH: customer_id -&gt; customerId</span>'
-        if has_breaking
-        else (
-            '<span class="mm-badge mm-badge-pass">REMEDIATED CONTRACT: VERIFIED PASS</span>'
-            if post_fix_ok
-            else '<span class="mm-badge mm-badge-pass">COMPATIBLE REST JSON CONTRACT</span>'
-        )
-    )
+    if has_breaking and report.finding_list:
+        f0 = report.finding_list[0]
+        if f0.replacement_candidate:
+            mismatch_text = f"BREAKING MISMATCH: {f0.field} -&gt; {f0.replacement_candidate}"
+        else:
+            mismatch_text = f"BREAKING MISMATCH: {f0.field} ({f0.kind})"
+        edge_badge = f'<span class="mm-badge mm-badge-fail">{mismatch_text}</span>'
+    elif post_fix_ok:
+        edge_badge = '<span class="mm-badge mm-badge-pass">REMEDIATED CONTRACT: VERIFIED PASS</span>'
+    else:
+        edge_badge = '<span class="mm-badge mm-badge-pass">COMPATIBLE REST JSON CONTRACT</span>'
+
     st.markdown(
         f"""
         <div class="mm-card" style="display:flex; align-items:center; justify-content:space-around; flex-wrap:wrap; gap:0.75rem; text-align:center;">
@@ -122,7 +130,7 @@ def render_finding_card(finding: Finding, post_fix_result: TestExecutionResult |
     ver_badge = (
         '<span class="mm-badge mm-badge-fail">REPRODUCED INTEGRATION FAILURE (Executed Test Failed)</span>'
         if finding.verification_state == "REPRODUCED_FAILURE"
-        else '<span class="mm-badge mm-badge-warn">POTENTIAL COMPATIBILITY ISSUE (Inferred Risk)</span>'
+        else '<span class="mm-badge mm-badge-warn">POTENTIAL COMPATIBILITY ISSUE (Static / Unverified Risk)</span>'
     )
     card_cls = "mm-card-fail" if finding.verification_state == "REPRODUCED_FAILURE" else "mm-card-warn"
 
@@ -183,7 +191,7 @@ def render_test_result_block(tr: TestExecutionResult) -> None:
                 </div>
                 <div>{badge_html}</div>
             </div>
-            {f'<div style="margin-top:0.5rem; font-family:Consolas,monospace; font-size:0.88rem; color:#fca5a5;"><strong>Observed Exception / Assertion:</strong> {tr.failure_summary}</div>' if tr.failure_summary else ''}
+            {f'<div style="margin-top:0.5rem; font-family:Consolas,monospace; font-size:0.88rem; color:#fca5a5;"><strong>Observed Exception / Note:</strong> {tr.failure_summary}</div>' if tr.failure_summary else ''}
         </div>
         """,
         unsafe_allow_html=True,

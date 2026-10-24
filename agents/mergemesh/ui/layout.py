@@ -7,21 +7,13 @@ from typing import Callable
 
 import streamlit as st
 
-from config.settings import AppSettings, check_provider_readiness
 from domain.models import AnalysisReport, ScenarioDefinition
-from services.report_export import (
-    export_report_to_json,
-    export_report_to_markdown,
-    save_report_artifacts,
-)
+from services.report_export import export_report_to_json, export_report_to_markdown
 from ui.components import (
     render_dependency_graph,
     render_finding_card,
-    render_header,
-    render_provider_readiness_sidebar,
     render_test_result_block,
 )
-from ui.styles import DASHBOARD_CSS
 
 
 def _compute_run_status_label(report: AnalysisReport | None, error_msg: str | None) -> str:
@@ -37,7 +29,7 @@ def _compute_run_status_label(report: AnalysisReport | None, error_msg: str | No
 def render_overview_tab(
     report: AnalysisReport,
     on_apply_fix: Callable[[], None],
-    on_switch_safe: Callable[[], None],
+    on_switch_safe: Callable[[], None] | None = None,
 ) -> None:
     """Render the Overview tab with summary cards, finding headline, dependency graph, and fix actions."""
     isolated_tests = [t for t in report.test_results if t.test_kind in {"provider_isolated", "consumer_isolated"}]
@@ -47,12 +39,14 @@ def render_overview_tab(
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
+        iso_label = f"{isolated_passed} / {len(isolated_tests)} Passed" if isolated_tests else "Not Configured"
+        iso_color = "#4ade80" if isolated_tests and isolated_passed == len(isolated_tests) else "#94a3b8"
         st.markdown(
             f"""
             <div class="mm-card">
                 <div class="mm-metric-label">Isolated PR Checks</div>
-                <div class="mm-metric-value" style="color:#4ade80;">{isolated_passed} / {len(isolated_tests)} Passed</div>
-                <div style="font-size:0.78rem; color:#94a3b8;">Consumer unit test uses mock</div>
+                <div class="mm-metric-value" style="color:{iso_color};">{iso_label}</div>
+                <div style="font-size:0.78rem; color:#94a3b8;">{'Consumer unit test uses mock' if any(t.uses_stale_mock for t in isolated_tests) else 'Per-repository unit tests'}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -65,7 +59,7 @@ def render_overview_tab(
             <div class="mm-card">
                 <div class="mm-metric-label">Combined Candidate Check</div>
                 <div class="mm-metric-value" style="color:{comb_color};">{comb_status}</div>
-                <div style="font-size:0.78rem; color:#94a3b8;">{combined_test.failure_summary if (combined_test and combined_test.failure_summary) else 'Live provider -> consumer'}</div>
+                <div style="font-size:0.78rem; color:#94a3b8;">{combined_test.failure_summary if (combined_test and combined_test.failure_summary) else ('Static analysis only' if comb_status == 'NOT_RUN' else 'Live provider -> consumer')}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -98,7 +92,7 @@ def render_overview_tab(
         )
 
     if report.consumer_mock_note:
-        st.info(f"**Coverage Gap Note:** {report.consumer_mock_note}")
+        st.info(f"**Execution / Coverage Note:** {report.consumer_mock_note}")
 
     st.markdown("#### Compatibility Verdict & Findings")
     if report.finding_list:
@@ -110,8 +104,8 @@ def render_overview_tab(
             <div class="mm-card-pass">
                 <strong>[VERIFIED COMPATIBLE] No Cross-Repository Contract Mismatches Detected</strong>
                 <p style="margin:0.4rem 0 0 0; color:#e2e8f0;">
-                    All isolated checks and the combined cross-repository check between
-                    <code>{report.provider_repo}</code> and <code>{report.consumer_repo}</code> executed and passed.
+                    Contract comparison and consumer AST analysis between
+                    <code>{report.provider_repo}</code> and <code>{report.consumer_repo}</code> detected no breaking changes.
                 </p>
             </div>
             """,
@@ -136,63 +130,71 @@ def render_overview_tab(
                 f"in {report.post_fix_result.duration_ms} ms."
             )
     with act_col2:
-        if report.scenario_id != "safe_optional_field":
+        if on_switch_safe is not None and report.scenario_id == "customer_id_rename":
             if st.button("Switch to Scenario B (Compatible Optional Field)", use_container_width=True):
                 on_switch_safe()
 
 
-def render_pr_changes_tab(report: AnalysisReport, scenario: ScenarioDefinition) -> None:
-    """Render side-by-side synthetic PR diffs and source files."""
-    st.caption(
-        "Simulated PR Fixture Mode: The diffs below are loaded from local repository fixtures (`fixtures/scenarios/`). "
-        "No live GitHub URL was fetched."
-    )
+def render_pr_changes_tab(report: AnalysisReport, scenario: ScenarioDefinition | None = None) -> None:
+    """Render side-by-side PR / Git revision diffs and source files."""
+    if report.input_mode == "local_git_repos":
+        st.caption(
+            "Local Git Repository Mode: The diffs below are computed directly from the selected local Git repositories and revisions."
+        )
+    else:
+        st.caption(
+            "Bundled PR Fixture Mode: The diffs below are loaded from local repository fixtures (`fixtures/scenarios/`)."
+        )
+
     col_a, col_b = st.columns(2)
     provider_diff = next((d for d in report.diffs if d.repo == report.provider_repo), None)
     consumer_diff = next((d for d in report.diffs if d.repo == report.consumer_repo), None)
 
     with col_a:
-        st.markdown(f"#### PR A — `{report.provider_repo}` (Provider)")
+        st.markdown(f"#### Provider — `{report.provider_repo}`")
         st.markdown(f"**{report.pr_a_title}**")
         if provider_diff:
-            st.caption(f"Fixture path: `fixtures/scenarios/{report.scenario_id}/{provider_diff.path}` (simulated PR fixture)")
+            st.caption(f"Path: `{provider_diff.path}`")
             if provider_diff.summary:
                 st.write(provider_diff.summary)
             st.code(provider_diff.content, language="diff")
 
     with col_b:
-        st.markdown(f"#### PR B — `{report.consumer_repo}` (Consumer)")
+        st.markdown(f"#### Consumer — `{report.consumer_repo}`")
         st.markdown(f"**{report.pr_b_title}**")
         if consumer_diff:
-            st.caption(f"Fixture path: `fixtures/scenarios/{report.scenario_id}/{consumer_diff.path}` (simulated PR fixture)")
+            st.caption(f"Path: `{consumer_diff.path}`")
             if consumer_diff.summary:
                 st.write(consumer_diff.summary)
             st.code(consumer_diff.content, language="diff")
 
-    if scenario.post_fix_consumer_source:
+    if scenario and scenario.post_fix_consumer_source:
         with st.expander("View Suggested Consumer Remediation (`repos/checkout-client/client_fixed.py`)"):
             fixed_path = Path(scenario.scenario_dir) / scenario.post_fix_consumer_source
             if fixed_path.exists():
                 st.code(fixed_path.read_text(encoding="utf-8"), language="python")
 
 
-def render_contract_tab(report: AnalysisReport, scenario: ScenarioDefinition) -> None:
-    """Render dependency graph, before/after JSON contract comparison, and AST consumer accesses."""
+def render_contract_tab(report: AnalysisReport, scenario: ScenarioDefinition | None = None) -> None:
+    """Render dependency graph, before/after contract comparison, and AST consumer accesses."""
     st.markdown("#### Service Dependency Topology")
     render_dependency_graph(report)
 
-    s_root = Path(scenario.scenario_dir)
+    comp = report.contract_comparison
+    before_lang = "python" if comp.provider_before_path.lower().endswith(".py") else "json"
+    after_lang = "python" if comp.provider_after_path.lower().endswith(".py") else "json"
+
     before_json_col, after_json_col = st.columns(2)
     with before_json_col:
-        st.markdown(f"**Provider Contract Before (`{report.contract_comparison.provider_before_path}`)**")
-        st.code((s_root / report.contract_comparison.provider_before_path).read_text(encoding="utf-8"), language="json")
+        st.markdown(f"**Provider Contract Before (`{comp.provider_before_path}`)**")
+        st.code(comp.before_raw_content, language=before_lang)
     with after_json_col:
-        st.markdown(f"**Provider Contract After (`{report.contract_comparison.provider_after_path}`)**")
-        st.code((s_root / report.contract_comparison.provider_after_path).read_text(encoding="utf-8"), language="json")
+        st.markdown(f"**Provider Contract After (`{comp.provider_after_path}`)**")
+        st.code(comp.after_raw_content, language=after_lang)
 
     st.markdown("#### Deterministic Before / After Contract Field Comparison")
     field_rows = []
-    for fc in report.contract_comparison.field_changes:
+    for fc in comp.field_changes:
         field_rows.append(
             {
                 "Field Path": fc.field_path,
@@ -223,8 +225,8 @@ def render_contract_tab(report: AnalysisReport, scenario: ScenarioDefinition) ->
         )
     st.dataframe(access_rows, use_container_width=True, hide_index=True)
     st.caption(
-        "Scope Note: The MVP deterministic analyzer extracts JSON response fields and scans Python AST dictionary "
-        "subscripts (`payload['key']`) and `.get('key')` calls."
+        "Scope Note: The deterministic analyzer extracts fields from JSON (.json) or Python (.py) provider contracts "
+        "and scans Python AST dictionary subscripts (`payload['key']`) and `.get('key')` calls."
     )
 
 
@@ -236,7 +238,7 @@ def render_test_evidence_tab(
     """Render executed test results, stdout/stderr logs, and report export actions."""
     top_col1, top_col2, top_col3 = st.columns([2, 2, 3])
     with top_col1:
-        if st.button("Run Allow-Listed Tests Again", use_container_width=True):
+        if st.button("Re-Run Analysis & Approved Tests", use_container_width=True):
             on_rerun_tests()
     with top_col2:
         if report.finding_list and not (report.post_fix_result and report.post_fix_result.status == "PASS"):
@@ -263,9 +265,15 @@ def render_test_evidence_tab(
                 use_container_width=True,
             )
 
-    st.markdown("#### Executed Test Suite Results")
-    for tr in report.test_results:
-        render_test_result_block(tr)
+    st.markdown("#### Test Suite Execution Results")
+    if not report.test_results:
+        st.info(
+            "No test files were configured for this run. Static contract and AST findings above are marked as "
+            "`INFERRED_RISK` (unverified by runtime test execution). Configure and approve pytest paths in the sidebar to run tests."
+        )
+    else:
+        for tr in report.test_results:
+            render_test_result_block(tr)
 
     if report.post_fix_result:
         st.markdown("#### Post-Fix Remediated Execution Result")
@@ -297,12 +305,12 @@ def render_ai_explanation_tab(
     """Render the AI Explanation tab with clear separation between measured facts and model output."""
     ai = report.ai_explanation
 
-    if ai.status in {"FALLBACK", "UNAVAILABLE"}:
+    if ai.status in {"FALLBACK", "UNAVAILABLE", "SKIPPED"}:
         st.info(
-            f"**AI explanation unavailable; compatibility findings and test evidence are still valid.**\n\n"
-            f"- **Active Provider Path:** `{ai.provider}` (`status={ai.status}`)\n"
-            f"- **Reason:** {ai.fallback_reason or 'Local Ollama or hosted Gemini credentials not available.'}\n"
-            f"- **Displayed Below:** Deterministic ground-truth explanation synthesized directly from measured AST and test evidence."
+            f"**Deterministic Explanation Active (`status={ai.status}`)**\n\n"
+            f"- **Active Provider Path:** `{ai.provider}`\n"
+            f"- **Detail:** {ai.fallback_reason or 'Local Ollama not running; using deterministic rule engine.'}\n"
+            f"- **Displayed Below:** Ground-truth explanation synthesized directly from measured AST, contract diff, and test evidence."
         )
     else:
         st.success(
@@ -319,19 +327,19 @@ def render_ai_explanation_tab(
             <div class="mm-card">
                 <div class="mm-metric-label">Authority Notice</div>
                 <div style="font-size:0.9rem; color:#e2e8f0;">
-                    Deterministic Python contract comparators, AST scanners, and the allow-listed pytest runner
+                    Deterministic Python contract comparators, AST scanners, and the opt-in pytest runner
                     establish the compatibility verdict. AI never overrides test results.
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-        st.markdown("**Observed Facts (Backed by Fixture Paths & Executed Tests):**")
+        st.markdown("**Observed Facts (Backed by Repository Paths & Executed Tests):**")
         for fact in ai.observed_facts:
             st.markdown(f"- {fact}")
 
         if report.source_hashes:
-            with st.expander("View Input Fixture SHA-256 Hashes"):
+            with st.expander("View Input File / Revision SHA-256 Hashes"):
                 st.json(report.source_hashes)
 
     with col_right:
