@@ -1,17 +1,94 @@
 # MergeMesh — Cross-Repository Change-Set Compatibility Agent
 
-> A local-first cross-repository compatibility analyzer and Google ADK agent workflow that inspects local Git repositories (or bundled PR scenarios), compares REST JSON and Python provider contracts across Git revisions, scans consumer Python AST field usage, optionally executes user-approved integration tests, and provides verified remediation guidance with zero API credit requirements.
+> **Product Vision**: MergeMesh is designed to autonomously detect cross-repository compatibility risks and flag them to affected developers before incompatible changes reach production.
 
 ---
 
-## Overview
+## Product Vision: An Autonomous Compatibility Agent
 
-### Problem Statement & Intended Users
-- **Problem**: Cloud and microservice applications frequently span multiple independently managed repositories (for example, a backend REST API repository and a downstream client or worker repository). Each repository's pull request can pass its own isolated CI suite—especially when consumer unit tests rely on stale or hardcoded mocks—yet fail at runtime when the candidate revisions are combined.
-- **Intended Users**: Backend, platform, and DevOps engineers working across multiple local Python/REST repositories who want deterministic, evidence-backed compatibility checks before merging candidate branches, without sending code to external cloud APIs or requiring paid LLM credits.
-- **Complementary Positioning**: MergeMesh does **not** claim to replace GitHub Merge Queues, GitLab Merge Trains, Pact consumer-driven contract testing, or full staging pipelines. It provides a focused, local-first workflow for correlating candidate Git revisions across two repositories when explicit cross-repo contract pipelines are missing or incomplete.
+MergeMesh is designed as an autonomous compatibility agent that monitors software changes across independently maintained repositories, identifies downstream consumers affected by API or contract changes, verifies suspected incompatibilities through execution, and alerts responsible engineering teams before breaking changes ever reach a production deployment.
 
-### Key Features
+Today, cross-repository compatibility checking is predominantly a **manual, reactive, or fragmented activity**: developers must manually coordinate breaking changes over Slack, maintain bespoke end-to-end staging environments, or discover breakages only after a deployment failure. MergeMesh's long-term goal is to transform compatibility analysis into an **automated, continuous, and proactive background workflow** across multi-repository organizations.
+
+---
+
+## The Problem: Cross-Repository Blind Spots
+
+In modern multi-repository and microservice architectures, services evolve independently:
+- **The "Green CI" Trap**: Each repository maintains its own isolated continuous integration pipeline. A pull request in a provider repository (e.g., `orders-api`) can pass all of its isolated unit and integration tests. Simultaneously, a consumer repository (e.g., `checkout-client`) can pass all of its isolated tests because its test suite relies on **stale, hardcoded mock responses** created months earlier.
+- **Contract Drift**: Routine changes—such as renaming a field (`customer_id` $\rightarrow$ `customerId`), removing a deprecated attribute, changing a value type (`integer` $\rightarrow$ `string`), or restructuring response objects—break consumer expectations silently.
+- **The Impact of Undetected Drift**: When these independently passing versions are deployed together, the integration failure surfaces at runtime:
+  - **Failed requests & runtime exceptions**: Consumers encounter unexpected `KeyError`, deserialization failures, or null reference errors.
+  - **Interrupted business workflows**: Critical user journeys (such as checkout, billing, or event processing) can fail mid-transaction.
+  - **Engineering firefighting & emergency rollbacks**: On-call engineers must perform triage across multiple service boundaries under pressure to diagnose which service introduced the mismatch.
+  - **Delayed releases**: Deployment rollouts are halted while cross-team discussions clarify the intended schema.
+
+MergeMesh addresses these blind spots by correlating candidate pull requests, diffing provider contracts, scanning consumer ASTs for affected lookups, and running controlled compatibility checks before changes merge.
+
+---
+
+## How Autonomous MergeMesh Is Intended to Work
+
+MergeMesh envisions an end-to-end, seven-step autonomous compatibility lifecycle across independent codebases:
+
+```text
+[1. Detect]  --->  [2. Trace]  --->  [3. Verify]  --->  [4. Reason]  --->  [5. Notify]  --->  [6. Remediate]  --->  [7. Prevent]
+ (Webhook/CI)       (AST Diff)        (Pytest)         (ADK+Gemma)        (PR/Email)         (Dual-Write)        (CI Gate)
+```
+
+1. **1. Detect (Planned Integration)**:
+   A GitHub webhook listener or continuous integration workflow triggers MergeMesh automatically whenever a pull request or commit modifies an API contract, OpenAPI specification, or data model in a provider repository.
+2. **2. Trace (Implemented in Prototype)**:
+   MergeMesh inspects the provider contract diff across Git revisions (`base_ref` $\rightarrow$ `target_ref`) and scans registered consumer repositories using Python's `ast` module to identify potentially affected code down to the exact file paths, line numbers, and access patterns (`payload["key"]` vs `payload.get("key")`).
+3. **3. Verify (Implemented in Prototype)**:
+   MergeMesh runs controlled, bounded compatibility tests and strictly distinguishes between:
+   - `INFERRED_RISK` (*Potential compatibility issue*): Static AST and contract analysis indicate an unhandled field modification, but no runtime test has been executed.
+   - `REPRODUCED_FAILURE` (*Reproduced integration failure*): A dedicated cross-repository test executes against the proposed change set and reproduces the failure (e.g., `exit_code=1`, `KeyError`).
+4. **4. Reason (Implemented in Prototype)**:
+   Using Google Agent Development Kit (`google-adk`) with Google Gemma (hosted `gemma-4-26b-a4b-it` or local `gemma4:e4b`), MergeMesh reasons over the deterministic ground truth to explain what changed, why isolated CI checks passed, the operational severity, and architectural migration options. (When the model is unavailable, an honest deterministic fallback rule engine provides the structured analysis).
+5. **5. Notify (Planned Integration)**:
+   Rather than broadcast generic alerts, MergeMesh autonomously dispatches targeted notifications to affected repository owners and PR authors via GitHub PR comments, email digests, or CI check annotations, detailing the specific line of code affected, the schema diff, and the reproduced error.
+6. **6. Remediate and Re-verify (Implemented in Prototype / Automated PRs Planned)**:
+   MergeMesh guides developers on backward-compatible fixes—such as provider dual-writing during deprecation windows or consumer defensive dual-reading—and re-executes tests to verify that the remediation passes before merging.
+7. **7. Prevent Release (Planned Integration)**:
+   An optional CI status check policy gates merging when verified breaking failures (`BREAKING_FAILURE_REPRODUCED`) or high-severity unacknowledged risks are present, preventing incompatible changes from reaching production environments.
+
+> [!NOTE]
+> **Operational Status**: The current prototype executes Steps 2, 3, 4, and 6 on local Git repositories and bundled PR fixtures through a Streamlit UI and Python API. Steps 1 (GitHub webhooks), 5 (automated PR/email alerts), and 7 (CI policy merge gating) are planned roadmap integrations and are not yet automated background services.
+
+---
+
+## Why It Matters
+
+Moving compatibility analysis from post-merge debugging to an autonomous pre-merge agent delivers substantial practical benefits:
+- **Earlier Lifecycle Detection**: Detects breaking contract incompatibilities at pull-request time before candidate code merges into trunk branches or deploys to staging.
+- **Eliminates Cross-Repo Blind Spots**: Surfaces mismatches that isolated unit tests miss due to stale, hardcoded consumer mocks.
+- **Actionable Evidence Over Generic Warnings**: Delivers exact source locations (`file.py:line`), AST access types, and pytest failure traces directly to responsible developers rather than vague change notifications.
+- **Reduces Production Incident Risks**: Mitigates the risk of unexpected runtime `KeyError` exceptions, transaction drop-offs, and emergency rollbacks caused by uncoordinated field deprecations.
+- **Facilitates Safer Migrations**: Encourages disciplined backward-compatible rollout strategies (such as provider dual-writing and consumer dual-reading) with verified test evidence.
+
+---
+
+## Current Capabilities vs. Roadmap
+
+The following table accurately reflects the current working implementation versus future roadmap integrations:
+
+| Capability Area | Current Prototype | Planned Autonomous Roadmap | Implementation Status |
+| :--- | :--- | :--- | :--- |
+| **Trigger Mechanism** | Manual invocation via Streamlit UI (`app.py`) or Python API (`run_custom_repo_analysis`) | Automated GitHub App webhook triggers on `pull_request` and `push` events | **Planned** |
+| **Provider Contract Extraction** | Deterministic `.json` (REST payloads / schemas) and `.py` AST (dict returns / typed models) across Git revisions (`main`, branches, commits, `WORKTREE`) | Automated OpenAPI / Protobuf / gRPC schema parsers and registry sync | **Implemented** (JSON & Python AST) |
+| **Consumer Usage Analysis** | Python AST static scanner for `payload["key"]`, nested subscripts, and `payload.get("key")` with file/line evidence | Multi-language AST scanners (TypeScript, Go, Java) across consumer codebases | **Implemented** (Python AST) |
+| **Consumer Discovery** | User specifies local consumer path or selects bundled multi-repo test scenarios | Centralized consumer repository registry with CODEOWNERS mapping | **Planned** |
+| **Compatibility Verification** | Opt-in bounded `pytest` subprocess execution (`INFERRED_RISK` vs `REPRODUCED_FAILURE`) | Ephemeral isolated container runner in CI with sandboxed execution | **Implemented** (Local subprocess) |
+| **AI Reasoning & Remediation** | Google ADK with hosted Gemma 4 (`gemma-4-26b-a4b-it`) or local Gemma (`gemma4:e4b`) + deterministic fallback | Autonomous agent dialogue: negotiates contract migration between author and consumers | **Implemented** (ADK + Gemma 4) |
+| **Developer Notification** | Interactive 5-tab Streamlit dashboard with JSON and Markdown export | Automated sticky PR comments, email notifications, and GitHub Check Run annotations | **Planned** |
+| **CI Merge Policy Enforcement** | Returns structured `AnalysisReport.overall_status` for headless scripting | Native GitHub Status Check blocking merge on `BREAKING_FAILURE_REPRODUCED` | **Planned** |
+| **Automated Remediation PRs** | Generates verified Python remediation code snippets and re-verifies post-fix tests | Autonomously opens consumer migration pull requests with human review | **Planned** |
+
+---
+
+## Key Features (Current Prototype)
+
 - **Reusable Local Git Repository Analyzer**: Point MergeMesh at any local provider Git repository and consumer Git repository, specify base and proposed Git revisions (`HEAD~1`, `main`, branch names, commit SHAs, or `WORKTREE`), and analyze real repository changes (`analysis/git_inspector.py`, `services/analyze_service.py`).
 - **Dual Contract Extraction (`.json` & `.py` AST)**: Extracts before/after provider response shapes from JSON contract/schema files (`.json`) or directly from Python provider source files (`.py` functions returning dictionary literals or annotated `BaseModel` / `TypedDict` / `@dataclass` classes) via `analysis/contract_extractor.py`.
 - **Python AST Consumer Usage Scanner**: Scans consumer Python files (`analysis/consumer_usage.py`) using Python's `ast` module to locate dictionary subscript (`payload["field"]`), nested subscript (`data["customer"]["id"]`), and `.get("field")` accesses with exact file paths, line numbers, and code snippets.
@@ -19,20 +96,7 @@
   - `INFERRED_RISK` (*"Potential compatibility issue"*): Reported when static contract diffing and consumer AST analysis detect a breaking mismatch but no runtime integration test has been executed.
   - `REPRODUCED_FAILURE` (*"Reproduced integration failure"*): Reported only when an explicitly approved integration test executes and fails (`exit_code=1`).
 - **Opt-In Safe Test Execution**: Bundled fixture tests run from an internal allow-list (`execution/fixture_registry.py`), while custom repository `pytest` files require explicit opt-in approval (`user_approved_test_execution=True`) before running in a bounded local subprocess (`execution/runner.py`).
-- **Local-First Google ADK & Ollama Integration**: Uses Google Agent Development Kit (`google-adk`) with `LiteLlm(model="ollama_chat/<OLLAMA_MODEL>")` (defaulting to `gemma4:e4b`, with `gemma4:e2b` and `gemma3:4b` supported via `OLLAMA_MODEL`) when local Ollama is running on `localhost:11434`, and automatically falls back to the built-in **Deterministic Local Rule Engine** when Ollama is offline or `deterministic` mode is selected.
-
-### Implemented vs. Planned Capabilities
-
-| Capability | Status | Notes |
-| :--- | :--- | :--- |
-| Reusable local Git repository & revision analysis (`base_ref` $\rightarrow$ `target_ref` / `WORKTREE`) | **Implemented** | Supports any local Git repositories, branches, tags, commit SHAs, or working tree |
-| Deterministic JSON (`.json`) and Python AST (`.py`) provider contract extraction | **Implemented** | Detects removed fields, added fields, type changes, missing required fields, candidate renames |
-| Python AST consumer field access scanner (single file or repo-wide auto-discovery) | **Implemented** | Detects `payload["key"]`, nested subscripts, and `payload.get("key")` |
-| Opt-in `pytest` runner for custom repos + allow-listed runner for bundled scenarios | **Implemented** | Captures exit code, duration, `stdout`, `stderr`, and exception summary |
-| Streamlit 5-tab dashboard with both Custom Git Repo mode & Bundled Scenarios | **Implemented** | Works completely offline with session-state caching and JSON/Markdown export |
-| Google ADK agent with local Gemma via Ollama + deterministic fallback | **Implemented** | Local-only runtime (`localhost:11434`); zero external network calls or API keys |
-| Remote GitHub URL cloning / webhook ingestion | **Planned** | Operates on local Git checkouts; remote cloning is not automated |
-| Non-Python consumer AST parsers (TypeScript/Go) & OpenAPI/Protobuf | **Planned** | Currently scoped to Python AST and JSON/Python dict contracts |
+- **Google ADK & Gemma Reasoning (Hosted & Local)**: Uses Google Agent Development Kit (`google-adk`) with `LiteLlm` supporting hosted Google Gemma 4 (`gemma-4-26b-a4b-it` via the Gemini Developer API) or local Gemma (`gemma4:e4b` via Ollama), with automatic fallback to the built-in **Deterministic Local Rule Engine** when models are offline.
 
 ---
 
@@ -238,7 +302,7 @@ print("AI Mode Status:", report.ai_explanation.status, "| Model:", report.ai_exp
 
 ## How to Test & Verification Scope
 
-Run the complete 37-test automated verification suite (unit tests, bundled scenario integration tests, independent temporary Git repository tests, timeout/invalid-JSON fallback tests, and headless Streamlit `AppTest` UI tests) from `agents/mergemesh`:
+Run the automated verification suite (unit tests, bundled scenario integration tests, independent temporary Git repository tests, timeout/invalid-JSON fallback tests, headless Streamlit `AppTest` UI tests, and hosted Gemma API smoke test) from `agents/mergemesh`:
 
 ```bash
 python -m pytest -v
@@ -248,10 +312,13 @@ python -m pytest -v
 - **Verified End-to-End in Automated Tests**:
   - Deterministic `.json` and `.py` AST contract extraction, consumer Python AST field usage scanning, and Git revision inspection across independent repositories.
   - Controlled `pytest` execution (`PASS` vs `FAIL`, `INFERRED_RISK` vs `REPRODUCED_FAILURE`).
-  - Google ADK `InMemoryRunner` $\rightarrow$ `LiteLlm` $\rightarrow$ `OllamaLiteLLMClient` request formatting (`role="system"` normalization, `response_format={"type": "json_object"}`, evidence prompt construction) and Pydantic schema validation (`AIExplanationSchema`), verified via controlled transport mocks.
+  - Google ADK `InMemoryRunner` $\rightarrow$ `LiteLlm` $\rightarrow$ `HostedGemmaLiteLLMClient` / `OllamaLiteLLMClient` request formatting (`role="system"` normalization, `response_format={"type": "json_object"}`, evidence prompt construction) and Pydantic schema validation (`AIExplanationSchema`).
   - Timeout (`TimeoutError`), offline Ollama server, missing model tag, and malformed JSON fallback behavior (`status="FALLBACK"` / `status="UNAVAILABLE"`).
-- **Requires Local Ollama Runtime Installation**:
+  - Live hosted Gemma 4 inference (`gemma-4-26b-a4b-it`) via the Google Gemini Developer API verified via live smoke test (`test_hosted_gemma_live_api_smoke_test`).
+- **Requires Local Ollama Runtime Installation (For Local AI Mode)**:
   - Live token generation from `gemma4:e4b` / `gemma4:e2b` / `gemma3:4b` over `http://localhost:11434` requires installing the Ollama daemon and running `ollama pull gemma4:e4b` on the host machine. When Ollama is not installed on the test runner, MergeMesh explicitly reports `status="FALLBACK"` and never claims live model execution occurred.
+- **Hosted Mode**:
+  - Requires `GEMINI_API_KEY` in `.env` or environment to run live inference against `gemma-4-26b-a4b-it`. If the key is not set, MergeMesh safely skips external network calls and displays an explicit `UNAVAILABLE` or `FALLBACK` status.
 
 ---
 
