@@ -160,6 +160,10 @@ class AIExplanation:
     limitations: list[str] = field(default_factory=list)
     duration_ms: int = 0
     fallback_reason: str | None = None
+    compatibility_assessment: str = ""
+    severity_label: str = "high"
+    remediation_tradeoffs: str = ""
+    verification_plan: list[str] = field(default_factory=list)
 
 
 @dataclass

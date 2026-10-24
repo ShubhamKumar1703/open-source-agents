@@ -19,7 +19,7 @@
   - `INFERRED_RISK` (*"Potential compatibility issue"*): Reported when static contract diffing and consumer AST analysis detect a breaking mismatch but no runtime integration test has been executed.
   - `REPRODUCED_FAILURE` (*"Reproduced integration failure"*): Reported only when an explicitly approved integration test executes and fails (`exit_code=1`).
 - **Opt-In Safe Test Execution**: Bundled fixture tests run from an internal allow-list (`execution/fixture_registry.py`), while custom repository `pytest` files require explicit opt-in approval (`user_approved_test_execution=True`) before running in a bounded local subprocess (`execution/runner.py`).
-- **Local-First Google ADK & Ollama Integration**: Uses Google Agent Development Kit (`google-adk`) with `LiteLlm(model="ollama_chat/gemma3:4b")` when local Ollama is running on `localhost:11434`, and automatically falls back to the built-in **Deterministic Local Rule Engine** when Ollama is offline or `deterministic` mode is selected.
+- **Local-First Google ADK & Ollama Integration**: Uses Google Agent Development Kit (`google-adk`) with `LiteLlm(model="ollama_chat/<OLLAMA_MODEL>")` (defaulting to `gemma4:e4b`, with `gemma4:e2b` and `gemma3:4b` supported via `OLLAMA_MODEL`) when local Ollama is running on `localhost:11434`, and automatically falls back to the built-in **Deterministic Local Rule Engine** when Ollama is offline or `deterministic` mode is selected.
 
 ### Implemented vs. Planned Capabilities
 
@@ -40,7 +40,7 @@
 
 - **Language & Runtime**: Python 3.10+ (tested on Python 3.10 and Python 3.13)
 - **Agent Framework / Core Library**: Google Agent Development Kit (`google-adk`), `litellm`, `pydantic`
-- **Models**: Local `gemma3:4b` (or `gemma2:2b`) via Ollama (`ollama_chat/gemma3:4b`), plus built-in **Deterministic Local Rule Engine** (requires no LLM runtime)
+- **Models**: Local `gemma4:e4b` (default), `gemma4:e2b` (lower-resource alternative), or `gemma3:4b` via Ollama (`ollama_chat/<OLLAMA_MODEL>`), plus built-in **Deterministic Local Rule Engine** (requires no LLM runtime)
 - **UI & Visualization**: Streamlit (`streamlit`), Graphviz DOT dependency graphs
 - **Test & Analysis Stack**: `pytest`, `fastapi`, `httpx`, Git CLI (`git rev-parse`, `git show`, `git diff`, `git ls-tree`), Python standard library (`ast`, `json`, `subprocess`, `hashlib`)
 
@@ -92,17 +92,33 @@
 
 ---
 
-## Prerequisites
+## Prerequisites & Ollama Setup
 
-- **Python**: Python `3.10` or higher (`python --version`)
-- **Git**: `git` CLI available in `PATH` (`git --version`) for analyzing local Git repositories and revisions
-- **Package Manager**: `pip` (`python -m pip --version`)
-- **API Keys / Cloud Credits**: **None required.** MergeMesh runs 100% locally without any API keys or cloud credentials.
-- **Optional Local LLM Runtime**: [Ollama](https://ollama.com/) installed locally with `gemma3:4b` pulled (`ollama pull gemma3:4b`) if you wish to test live local LLM generation alongside the deterministic engine.
+1. **Python**: Python `3.10` or higher (`python --version`; tested on Python 3.10 and Python 3.13).
+2. **Git**: `git` CLI available in `PATH` (`git --version`) for inspecting local Git repositories and revisions.
+3. **Package Manager**: `pip` (`python -m pip --version`).
+4. **API Keys / Cloud Credits**: **None required.** MergeMesh runs 100% locally without any API keys or cloud credentials.
+5. **Local Gemma Reasoning via Ollama (Primary AI Mode)**:
+   - Install [Ollama](https://ollama.com/download) (`winget install Ollama.Ollama` on Windows, `brew install ollama` on macOS, or the official install script on Linux).
+   - Start the local Ollama daemon if it is not already running:
+     ```bash
+     ollama serve
+     ```
+   - Pull the validated primary reasoning model **`gemma4:e4b`** (or **`gemma4:e2b`** for lower VRAM/RAM, or **`gemma3:4b`**):
+     ```bash
+     ollama pull gemma4:e4b
+     # Lower-resource alternative:
+     # ollama pull gemma4:e2b
+     ```
+   - Verify Ollama is serving the model locally:
+     ```bash
+     ollama list
+     ```
+   - *First-Run Honesty Note*: If Ollama is not installed or not running on `http://localhost:11434`, MergeMesh **never** disguises fallback output as live Gemma output. Both the CLI and Streamlit UI prominently display `[DETERMINISTIC FALLBACK MODE (status=FALLBACK) — NOT LIVE GEMMA OUTPUT]` along with the exact recovery command.
 
 ---
 
-## Installation & Setup
+## Installation & Setup (Clean Checkout)
 
 1. **Navigate to the project directory:**
    ```bash
@@ -126,7 +142,7 @@
      ```
 
 3. **Configure Environment Variables (Optional):**
-   MergeMesh runs with safe local defaults out of the box. To customize settings, copy `.env.example` to `.env`:
+   MergeMesh runs with safe local defaults out of the box (`MERGEMESH_AI_MODE=local`, `OLLAMA_MODEL=gemma4:e4b`). To customize settings, copy `.env.example` to `.env`:
    ```bash
    # Windows PowerShell:
    Copy-Item .env.example .env
@@ -141,12 +157,13 @@
 
 | Variable Name | Required | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `MERGEMESH_AI_MODE` | No | `local` | `local` (Local Gemma via Ollama + ADK with deterministic fallback) or `deterministic` (Pure Python engine, zero LLM calls) |
-| `OLLAMA_BASE_URL` | No | `http://localhost:11434` | Local loopback URL for Ollama (`localhost` / `127.0.0.1` enforced) |
-| `OLLAMA_MODEL` | No | `gemma3:4b` | Local Ollama model tag used by Google ADK `LiteLlm` |
-| `ALLOW_LOCAL_FALLBACK` | No | `true` | When `true`, preserves the full report and uses deterministic explanation fallback if Ollama is offline |
+| `MERGEMESH_AI_MODE` | No | `local` | `local` (Primary Gemma reasoning via Ollama + Google ADK with explicit fallback) or `deterministic` (Pure Python engine, zero LLM calls) |
+| `OLLAMA_BASE_URL` | No | `http://localhost:11434` | Local loopback URL for Ollama (`localhost` / `127.0.0.1` / `::1` enforced) |
+| `OLLAMA_MODEL` | No | `gemma4:e4b` | Validated local Ollama model tag (`gemma4:e4b` primary, `gemma4:e2b` lightweight, or `gemma3:4b`) |
+| `ALLOW_LOCAL_FALLBACK` | No | `true` | When `true`, preserves deterministic findings and returns `status="FALLBACK"` if Ollama is offline; when `false`, returns `status="UNAVAILABLE"` |
 | `TEST_RUNNER_TIMEOUT_SECONDS` | No | `15` | Maximum timeout in seconds for each `pytest` subprocess |
 | `AI_REQUEST_TIMEOUT_SECONDS` | No | `25` | Maximum timeout in seconds for local Ollama inference requests |
+| `AI_MAX_OUTPUT_TOKENS` | No | `1200` | Maximum completion tokens (`num_predict`) requested from Ollama |
 
 ---
 
@@ -159,15 +176,15 @@ python -m streamlit run app.py
 
 In the sidebar under **Analysis Input Source**, choose between:
 - **Local Git Repositories (Custom Paths & Refs)**:
-  1. Enter your local **Provider Repo Path** (e.g., `/path/to/orders-api`), **Base Git Ref** (e.g., `HEAD~1` or `main`), and **Proposed Git Ref** (e.g., `HEAD`, a feature branch name, or `WORKTREE`).
+  1. Enter your local **Provider Repo Path** (e.g., `/path/to/orders-provider`), **Base Git Ref** (e.g., `main` or `HEAD~1`), and **Proposed Git Ref** (e.g., `HEAD`, a feature branch name, or `WORKTREE`).
   2. Optionally enter the relative **Contract File Path** (`.json` or `.py`), or leave it blank to auto-discover.
-  3. Enter your local **Consumer Repo Path** (e.g., `/path/to/checkout-client`) and **Consumer Target Ref** (e.g., `HEAD` or `WORKTREE`). Leave **Consumer Python File** blank to scan all non-test `.py` files in the consumer repo.
-  4. *(Optional)* Open **3. Optional Pytest Execution (Explicit Approval)**, check **"I approve executing the configured pytest files locally"**, and provide relative `.py` test paths if you want MergeMesh to run tests and verify whether static risks are reproduced at runtime.
+  3. Enter your local **Consumer Repo Path** (e.g., `/path/to/checkout-consumer`) and **Consumer Target Ref** (e.g., `main` or `HEAD`).
+  4. *(Optional)* Open **3. Optional Pytest Execution (Explicit Approval)**, check **"I approve executing the configured pytest files locally"**, and enter relative `.py` test paths (e.g., `tests/test_cross_repo_integration.py`).
   5. Click **Analyze Change Set**.
 - **Bundled Example Scenarios**:
-  - Select **Scenario A — Breaking Field Rename (`customer_id` $\rightarrow$ `customerId`)** or **Scenario B — Compatible Optional Field Addition (`display_name`)** for an immediate, self-contained demonstration.
+  - Select **Scenario A — Breaking Field Rename (`customer_id` $\rightarrow$ `customerId`)** or **Scenario B — Compatible Optional Field Addition (`display_name`)** for an immediate fixture demonstration.
 
-### 2. Analyze Any Local Git Repositories via Python CLI
+### 2. Analyze Any Local Git Repositories via Python API
 ```python
 from services.analyze_service import CustomRepoAnalysisRequest, run_custom_repo_analysis
 
@@ -182,8 +199,7 @@ report = run_custom_repo_analysis(
     )
 )
 print("Overall Verdict:", report.overall_status)
-for finding in report.finding_list:
-    print(f"[{finding.severity}] {finding.finding_id} ({finding.verification_state}): {finding.summary}")
+print("AI Mode Status:", report.ai_explanation.status, "| Model:", report.ai_explanation.model)
 ```
 
 ---
@@ -220,13 +236,63 @@ for finding in report.finding_list:
 
 ---
 
-## How to Test
+## How to Test & Verification Scope
 
-Run the complete 31-test automated verification suite (unit tests, bundled scenario integration tests, custom temporary Git repository tests, and headless Streamlit `AppTest` UI tests) from `agents/mergemesh`:
+Run the complete 37-test automated verification suite (unit tests, bundled scenario integration tests, independent temporary Git repository tests, timeout/invalid-JSON fallback tests, and headless Streamlit `AppTest` UI tests) from `agents/mergemesh`:
 
 ```bash
 python -m pytest -v
 ```
+
+### What Has and Has Not Been Tested with a Live Model
+- **Verified End-to-End in Automated Tests**:
+  - Deterministic `.json` and `.py` AST contract extraction, consumer Python AST field usage scanning, and Git revision inspection across independent repositories.
+  - Controlled `pytest` execution (`PASS` vs `FAIL`, `INFERRED_RISK` vs `REPRODUCED_FAILURE`).
+  - Google ADK `InMemoryRunner` $\rightarrow$ `LiteLlm` $\rightarrow$ `OllamaLiteLLMClient` request formatting (`role="system"` normalization, `response_format={"type": "json_object"}`, evidence prompt construction) and Pydantic schema validation (`AIExplanationSchema`), verified via controlled transport mocks.
+  - Timeout (`TimeoutError`), offline Ollama server, missing model tag, and malformed JSON fallback behavior (`status="FALLBACK"` / `status="UNAVAILABLE"`).
+- **Requires Local Ollama Runtime Installation**:
+  - Live token generation from `gemma4:e4b` / `gemma4:e2b` / `gemma3:4b` over `http://localhost:11434` requires installing the Ollama daemon and running `ollama pull gemma4:e4b` on the host machine. When Ollama is not installed on the test runner, MergeMesh explicitly reports `status="FALLBACK"` and never claims live model execution occurred.
+
+---
+
+## Troubleshooting Common Failures
+
+| Symptom / Status | Cause | Resolution |
+| :--- | :--- | :--- |
+| **`Ollama service offline and CLI not found`** (`status=FALLBACK`) | Ollama is not installed or `ollama serve` is not running on `http://localhost:11434` | Install Ollama from [ollama.com](https://ollama.com), run `ollama serve`, and pull `gemma4:e4b`. |
+| **`Ollama running, but model 'gemma4:e4b' is not pulled`** (`status=FALLBACK`) | Ollama server is reachable on port `11434`, but the configured `OLLAMA_MODEL` tag has not been downloaded yet | Run `ollama pull gemma4:e4b` (or set `OLLAMA_MODEL=gemma4:e2b` / `gemma3:4b` in `.env` to match an already installed tag from `ollama list`). |
+| **`Local AI invocation or schema validation failed: TimeoutError`** | Local model cold-start or CPU inference exceeded `AI_REQUEST_TIMEOUT_SECONDS` (`25s` default) | Increase `AI_REQUEST_TIMEOUT_SECONDS=60` in `.env` or switch to the lighter `OLLAMA_MODEL=gemma4:e2b`. |
+| **`ValidationError` / Malformed Model Output** (`status=FALLBACK`) | Local model returned truncated JSON (e.g., token limit reached) or omitted required schema keys | Increase `AI_MAX_OUTPUT_TOKENS=1600` in `.env`. MergeMesh automatically catches malformed output and falls back to the deterministic engine without crashing. |
+| **`Blocked non-local OLLAMA_BASE_URL`** | `OLLAMA_BASE_URL` points to a non-loopback remote host | Set `OLLAMA_BASE_URL=http://localhost:11434` (MergeMesh enforces loopback-only URLs). |
+
+---
+
+## Current Status and Roadmap
+
+### 1. Implemented and Verified Today
+- **Deterministic Cross-Repo Analyzer**: Extracts and diffs `.json` and `.py` AST provider contracts across arbitrary local Git revisions (`main`, branches, tags, commit SHAs, `WORKTREE`) and scans consumer Python AST dictionary accesses (`payload["key"]`, `.get("key")`).
+- **Multi-Repository Integration Verification (`tests/integration/test_custom_repo_workflow.py`)**: Automated integration tests create genuinely independent temporary Git repositories (`orders_service` and `checkout_service`) with separate Git histories to verify breaking field renames (`customer_id` $\rightarrow$ `customerId`), harmless additive changes (`display_name`), and offline deterministic fallback.
+- **Google ADK + Gemma Reasoning Pipeline**: Structured prompt builder (`agents/prompts.py`), ADK `InMemoryRunner` + `LiteLlm` client (`agents/factory.py`), `<think>`-aware JSON parser, schema validator (`agents/schemas.py`), and grounding guardrails (`agents/workflow.py`).
+- **Explicit Operating Modes & Streamlit UI**: 5-tab Streamlit dashboard (`app.py`) and Markdown/JSON exporter that strictly separate deterministic findings from AI interpretation and visibly distinguish `Gemma Mode Active (status=SUCCESS)` from `Deterministic Fallback Mode (status=FALLBACK)`.
+
+### 2. Prototype / Manual Workflow Today
+- **Manual Launch & Local Repository Selection**: Today, a developer runs `python -m streamlit run app.py` (or invokes `run_custom_repo_analysis()` from Python) locally and selects the local filesystem paths and Git revisions for the provider and consumer repositories.
+- **No Automated GitHub Webhook or PR Bot Yet**: MergeMesh does not currently include a deployed GitHub App, webhook listener, or live `.github/workflows/` PR comment bot.
+
+### 3. Planned: Path to Automated GitHub Actions PR Checks
+To evolve MergeMesh from a local pre-merge analyzer into an automated CI gate across multi-repo microservices:
+- **Triggering Repository (`pull_request` workflow)**:
+  - A GitHub Actions workflow in either the **provider repository** (on PRs modifying `contracts/**` or API route modules) or the **consumer repository** triggers on `pull_request` events.
+- **Partner Repository Discovery & Checkout**:
+  - A declarative `.mergemesh.yaml` manifest in the repository root specifies the partner repository slug (e.g., `org/checkout-consumer`), default target branch (`main`), contract path, and optional integration test command.
+  - The workflow uses `actions/checkout` twice: once for the PR head revision (`HEAD`) and once to clone the partner repository into a sibling workspace directory using a fine-grained, read-only repository deploy key or scoped `GITHUB_TOKEN`.
+- **Execution, Timeouts & Graceful Fallback in CI**:
+  - The CI job runs `run_custom_repo_analysis()` in headless CLI mode and writes `report_<id>.json` and `report_<id>.md`.
+  - If an internal Ollama runner or self-hosted GPU runner is configured, Gemma generates the contextual PR summary within `AI_REQUEST_TIMEOUT_SECONDS`; if no model runner is available in CI, `MERGEMESH_AI_MODE=deterministic` (or automatic `FALLBACK`) guarantees the check still completes deterministically with zero external API keys.
+- **Publishing Evidence-Backed PR Results**:
+  - A final workflow step posts or updates a single sticky PR comment from the generated Markdown report (`export_report_to_markdown(report)`) and sets the GitHub Check Run exit code (`1` on `BREAKING_FAILURE_REPRODUCED` or high-severity `POTENTIAL_COMPATIBILITY_ISSUE`, `0` on `COMPATIBLE_PASS`).
+- **Credential-Free CI Testing**:
+  - All automation logic is testable offline using temporary local Git repositories (`tests/integration/test_custom_repo_workflow.py`) without requiring live GitHub tokens or cloud model credentials.
 
 ---
 
@@ -234,7 +300,7 @@ python -m pytest -v
 
 - **Supported Contract & Language Scope**: Provider contract extraction supports JSON files (`.json`) and Python files (`.py`) containing functions that return dictionary literals or annotated model classes (`BaseModel`, `TypedDict`, `@dataclass`). Consumer usage scanning supports static string dictionary subscripts (`payload["key"]`) and `.get("key")` calls in Python `.py` files. Dynamic key lookup (`payload[var]`), complex runtime serialization, or non-Python languages are not parsed.
 - **Subprocess Execution Boundary**: Opt-in test execution runs `python -m pytest` as a local OS subprocess (`shell=False`, sanitized environment variables, bounded timeout). It is **not** a container, VM, or kernel sandbox; only approve test execution on local repositories you trust.
-- **Local Ollama Availability**: If Ollama is not running on `localhost:11434` or `gemma3:4b` is not pulled, MergeMesh does not claim local LLM generation occurred; it labels the explanation status as `FALLBACK` (or `SKIPPED` in `deterministic` mode) and uses the deterministic rule engine.
+- **Local Ollama Availability**: If Ollama is not running on `localhost:11434` or the configured `OLLAMA_MODEL` (`gemma4:e4b` by default) is not pulled, MergeMesh does not claim local LLM generation occurred; it labels the explanation status as `FALLBACK` (or `SKIPPED` in `deterministic` mode) and uses the deterministic rule engine.
 
 ---
 
@@ -243,14 +309,6 @@ python -m pytest -v
 - **Zero Secrets & Zero External Network Calls**: MergeMesh requires no API keys and never transmits repository code, diffs, contracts, test outputs, or prompts to external AI services. `config/settings.py` enforces loopback-only URLs (`localhost` / `127.0.0.1` / `::1`) for local Ollama checks.
 - **Explicit Opt-In for User Repo Tests**: In Custom Git Repository mode, `user_approved_test_execution` defaults to `False`. MergeMesh never automatically executes code from analyzed repositories.
 - **Command & Path Validation**: All Git and `pytest` commands run with `shell=False`, reject leading `-` flag injection on revision/path inputs, and reject `..` path traversal outside the repository root.
-
----
-
-## Future Improvements
-
-- [ ] Support OpenAPI 3.x YAML/JSON specifications and FastAPI `response_model` resolution across imported modules.
-- [ ] Extend AST consumer scanners to TypeScript/JavaScript (`fetch` / `axios` response destructuring).
-- [ ] Add optional Docker container isolation for executing untrusted repository test suites.
 
 ---
 

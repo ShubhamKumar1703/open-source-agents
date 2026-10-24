@@ -45,7 +45,7 @@ def main() -> None:
             default_settings = load_settings()
             st.session_state["selected_ai_mode"] = (
                 default_settings.ai_mode
-                if default_settings.ai_mode in {"local", "deterministic"}
+                if default_settings.ai_mode in {"local", "gemini", "deterministic"}
                 else "local"
             )
         except ValueError:
@@ -80,9 +80,10 @@ def main() -> None:
         st.session_state["last_error"] = None
         st.session_state["post_fix_enabled"] = False
 
-    ai_modes = ["local", "deterministic"]
+    ai_modes = ["local", "gemini", "deterministic"]
     mode_labels = {
         "local": "local — Local Gemma via Ollama + ADK (Auto Fallback)",
+        "gemini": "gemini — Hosted Gemma (gemma-4-26b-a4b-it via Gemini API + ADK)",
         "deterministic": "deterministic — Pure Deterministic Engine (No LLM)",
     }
     selected_mode = st.sidebar.selectbox(
@@ -224,7 +225,7 @@ def main() -> None:
         st.session_state["post_fix_enabled"] = run_post_fix
         custom_request.run_post_fix = run_post_fix
         try:
-            raw_key = f"custom|{custom_request}|{settings.ai_mode}"
+            raw_key = f"custom|{custom_request}|{settings.ai_mode}|{settings.ollama_model}"
             cache_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:20]
             with st.spinner("Inspecting local Git repositories, comparing contracts, and scanning AST..."):
                 report = run_custom_repo_analysis(
@@ -287,7 +288,12 @@ def main() -> None:
         else "simulated_fixture"
     )
 
-    render_header(settings, run_status, input_mode=current_input_mode)
+    render_header(
+        settings,
+        run_status,
+        input_mode=current_input_mode,
+        ai_status=active_report.ai_explanation.status if active_report else None,
+    )
 
     if st.session_state["last_error"]:
         st.error(f"**Analysis Error:** {st.session_state['last_error']}")

@@ -16,17 +16,30 @@ def export_report_to_json(report: AnalysisReport) -> str:
 
 def export_report_to_markdown(report: AnalysisReport) -> str:
     """Format an AnalysisReport as a developer-friendly Markdown document."""
+    input_mode_desc = (
+        "Local Git repositories (`local_git_repos`)."
+        if report.input_mode == "local_git_repos"
+        else "Bundled local PR fixture (`simulated_fixture`)."
+    )
+    ai = report.ai_explanation
+    is_live_gemma = ai.status == "SUCCESS"
+    section3_title = (
+        f"## 3. Gemma AI Reasoning & Remediation (`{ai.model}`)"
+        if is_live_gemma
+        else f"## 3. Deterministic Fallback Assessment (`status={ai.status}` — Not Model-Generated)"
+    )
+
     lines: list[str] = [
         f"# MergeMesh Compatibility Report — `{report.scenario_id}`",
         "",
-        "> **Input Mode:** Synthetic local PR fixture (`simulated_fixture`). No live GitHub API call was made.",
+        f"> **Input Mode:** {input_mode_desc} No external cloud API call was made.",
         "",
         f"- **Run ID:** `{report.run_id}`",
         f"- **Timestamp (UTC):** `{report.created_at}`",
         f"- **Provider Repo:** `{report.provider_repo}` ({report.pr_a_title})",
         f"- **Consumer Repo:** `{report.consumer_repo}` ({report.pr_b_title})",
         f"- **Overall Verdict:** **{report.overall_status}**",
-        f"- **AI Explanation Mode:** `{report.ai_explanation.provider}` (`status={report.ai_explanation.status}`)",
+        f"- **Explanation Mode:** `{ai.provider}` (`status={ai.status}`, `model={ai.model}`)",
         "",
         "---",
         "",
@@ -69,19 +82,31 @@ def export_report_to_markdown(report: AnalysisReport) -> str:
 
     lines.extend(
         [
-            "## 3. AI Interpretation & Remediation Options",
+            section3_title,
             "",
-            f"> **Source:** {report.ai_explanation.provider} | **Status:** `{report.ai_explanation.status}`",
+            f"> **Source:** {ai.provider} | **Status:** `{ai.status}` | **Severity:** `{ai.severity_label}` | **Confidence:** `{ai.confidence_label}`",
             "",
-            f"**Summary:** {report.ai_explanation.summary}",
-            "",
-            f"**Why It Matters:** {report.ai_explanation.why_it_matters}",
-            "",
-            "**Suggested Fix Options:**",
         ]
     )
-    for opt in report.ai_explanation.suggested_fix_options:
+    if not is_live_gemma and ai.fallback_reason:
+        lines.extend([f"> **Fallback Reason:** {ai.fallback_reason}", ""])
+
+    lines.append(f"**Summary:** {ai.summary}")
+    lines.append("")
+    if ai.compatibility_assessment:
+        lines.append(f"**Compatibility Assessment:** {ai.compatibility_assessment}")
+        lines.append("")
+    lines.append(f"**Downstream Impact:** {ai.why_it_matters}")
+    lines.append("")
+    lines.append("**Suggested Fix Options:**")
+    for opt in ai.suggested_fix_options:
         lines.append(f"- {opt}")
+    if ai.remediation_tradeoffs:
+        lines.extend(["", f"**Trade-offs (Consumer vs. Provider):** {ai.remediation_tradeoffs}"])
+    if ai.verification_plan:
+        lines.extend(["", "**Verification Plan:**"])
+        for step in ai.verification_plan:
+            lines.append(f"- {step}")
 
     return "\n".join(lines) + "\n"
 

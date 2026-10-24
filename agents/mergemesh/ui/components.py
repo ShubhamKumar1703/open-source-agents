@@ -8,15 +8,27 @@ from config.settings import AppSettings, ProviderReadiness
 from domain.models import AnalysisReport, Finding, TestExecutionResult
 
 
-def render_header(settings: AppSettings, run_status: str, input_mode: str = "simulated_fixture") -> None:
+def render_header(
+    settings: AppSettings,
+    run_status: str,
+    input_mode: str = "simulated_fixture",
+    ai_status: str | None = None,
+) -> None:
     """Render the top MergeMesh identity header and status pills."""
-    mode_labels = {
-        "local": f"AI Mode: Local Gemma ({settings.ollama_model})",
-        "deterministic": "Mode: Deterministic Only (No LLM)",
-        "gemini": "Mode: Hosted Disabled (Local-Only Runtime)",
-        "hybrid": f"AI Mode: Local Gemma ({settings.ollama_model})",
-    }
-    ai_badge_text = mode_labels.get(settings.ai_mode, f"Mode: {settings.ai_mode}")
+    active_model_label = settings.gemini_model if settings.ai_mode == "gemini" else settings.ollama_model
+    if settings.ai_mode == "deterministic" or ai_status == "SKIPPED":
+        ai_badge_text = "Operating Mode: Deterministic Only (No LLM)"
+        ai_badge_cls = "mm-badge-info"
+    elif ai_status == "SUCCESS":
+        ai_badge_text = f"Operating Mode: Gemma Active ({active_model_label})"
+        ai_badge_cls = "mm-badge-pass"
+    elif ai_status in {"FALLBACK", "UNAVAILABLE"}:
+        ai_badge_text = f"Operating Mode: Deterministic Fallback ({active_model_label} Unavailable)"
+        ai_badge_cls = "mm-badge-warn"
+    else:
+        ai_badge_text = f"Configured Mode: Gemma ({active_model_label})"
+        ai_badge_cls = "mm-badge-info"
+
     input_badge_text = (
         "Input: Local Git Repositories"
         if input_mode == "local_git_repos"
@@ -36,11 +48,11 @@ def render_header(settings: AppSettings, run_status: str, input_mode: str = "sim
         <div class="mm-header">
             <div>
                 <div class="mm-title">MergeMesh</div>
-                <div class="mm-subtitle">Catch cross-repository failures before merge — Deterministic contract analysis &amp; executable compatibility evidence</div>
+                <div class="mm-subtitle">Catch cross-repository failures before merge — Deterministic contract analysis &amp; Gemma compatibility reasoning</div>
             </div>
             <div class="mm-badge-row">
                 <span class="mm-badge mm-badge-fixture">{input_badge_text}</span>
-                <span class="mm-badge mm-badge-info">{ai_badge_text}</span>
+                <span class="mm-badge {ai_badge_cls}">{ai_badge_text}</span>
                 <span class="mm-badge {status_class}">Status: {run_status}</span>
             </div>
         </div>
@@ -54,8 +66,11 @@ def render_provider_readiness_sidebar(readiness: ProviderReadiness, settings: Ap
     st.sidebar.markdown("### Local Runtime Status")
     st.sidebar.caption("**Deterministic Engine:** [READY] Active (Python AST + Contract Diff + Pytest)")
     ollama_icon = "[READY]" if (readiness.ollama_reachable and readiness.ollama_model_installed) else "[OFFLINE]"
-    st.sidebar.caption(f"**Local Ollama:** {ollama_icon} {readiness.ollama_status_message}")
-    st.sidebar.caption("**External Hosted APIs:** Disabled (Local-Only Runtime — No API Credits Needed)")
+    st.sidebar.caption(f"**Local Ollama ({settings.ollama_model}):** {ollama_icon} {readiness.ollama_status_message}")
+    if readiness.ollama_recovery_hint:
+        st.sidebar.caption(f"**Recovery Hint:** {readiness.ollama_recovery_hint}")
+    gemini_icon = "[READY]" if readiness.gemini_configured else "[NOT CONFIGURED]"
+    st.sidebar.caption(f"**Hosted Gemma ({settings.gemini_model}):** {gemini_icon} {readiness.gemini_status_message}")
     st.sidebar.caption(
         f"**Fallback Policy:** `ALLOW_LOCAL_FALLBACK={str(settings.allow_local_fallback).lower()}`"
     )

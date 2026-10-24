@@ -328,6 +328,8 @@ def run_custom_repo_analysis(
 
     det_duration_ms = int((time.perf_counter_ns() - det_start_ns) / 1_000_000)
 
+    primary_c_file = consumer_accesses[0].file_path if consumer_accesses else consumer_files[0]
+
     # 4. Compute real Git diffs for display
     provider_diff_text = get_repo_diff(
         provider_dir,
@@ -343,8 +345,7 @@ def run_custom_repo_analysis(
             rel_path=consumer_rel_input or None,
         )
     else:
-        first_c_file = consumer_files[0]
-        consumer_diff_text = read_repo_file_at_revision(consumer_dir, request.consumer_target_ref, first_c_file)
+        consumer_diff_text = read_repo_file_at_revision(consumer_dir, request.consumer_target_ref, primary_c_file)
 
     diffs = [
         DiffFileRef(
@@ -355,7 +356,7 @@ def run_custom_repo_analysis(
         ),
         DiffFileRef(
             repo=consumer_repo_name,
-            path=consumer_files[0],
+            path=primary_c_file,
             summary=(
                 f"Git diff {request.consumer_base_ref}..{request.consumer_target_ref}"
                 if cons_base_sha
@@ -454,7 +455,7 @@ def run_custom_repo_analysis(
         breaking=comparison.is_breaking_candidate,
         provider_before=before_label,
         provider_after=after_label,
-        consumer_source=consumer_files[0],
+        consumer_source=primary_c_file,
         provider_source=contract_rel,
         provider_test=request.provider_test_rel_path,
         consumer_test=request.consumer_test_rel_path,

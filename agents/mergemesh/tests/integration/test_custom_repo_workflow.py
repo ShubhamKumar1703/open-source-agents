@@ -335,3 +335,244 @@ def test_custom_git_repos_error_handling_invalid_paths_revisions_and_contracts(
                 provider_target_ref="HEAD",
             )
         )
+
+
+def test_independent_repos_gemma_adk_workflow_scenario_a_b_and_c(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the complete Google ADK + Gemma workflow across two independent local Git repositories
+    for Scenario A (breaking customer_id -> customerId), Scenario B (compatible display_name addition),
+    and Scenario C (model unavailable fallback).
+    """
+    from config.settings import ProviderReadiness
+    from services.report_export import export_report_to_markdown
+
+    prov_repo = tmp_path / "orders-provider"
+    cons_repo = tmp_path / "checkout-consumer"
+    _init_git_repo(prov_repo)
+    _init_git_repo(cons_repo)
+
+    # Commit 1 (base): {"customer_id": "123", "total": 49.99}
+    (prov_repo / "order_response.json").write_text(
+        json.dumps({"customer_id": "123", "total": 49.99}),
+        encoding="utf-8",
+    )
+    (prov_repo / "order_service.py").write_text(
+        'def fetch_order() -> dict:\n    return {"customer_id": "123", "total": 49.99}\n',
+        encoding="utf-8",
+    )
+    _git(prov_repo, "checkout", "-b", "main")
+    _git(prov_repo, "add", ".")
+    _git(prov_repo, "commit", "-m", "Base order contract")
+
+    # Branch feat/breaking-rename (Scenario A): {"customerId": "123", "total": 49.99}
+    _git(prov_repo, "checkout", "-b", "feat/breaking-rename")
+    (prov_repo / "order_response.json").write_text(
+        json.dumps({"customerId": "123", "total": 49.99}),
+        encoding="utf-8",
+    )
+    (prov_repo / "order_service.py").write_text(
+        'def fetch_order() -> dict:\n    return {"customerId": "123", "total": 49.99}\n',
+        encoding="utf-8",
+    )
+    _git(prov_repo, "add", ".")
+    _git(prov_repo, "commit", "-m", "Rename customer_id to customerId")
+
+    # Branch feat/add-display-name (Scenario B): {"customer_id": "123", "total": 49.99, "display_name": "Ada"}
+    _git(prov_repo, "checkout", "main")
+    _git(prov_repo, "checkout", "-b", "feat/add-display-name")
+    (prov_repo / "order_response.json").write_text(
+        json.dumps({"customer_id": "123", "total": 49.99, "display_name": "Ada"}),
+        encoding="utf-8",
+    )
+    (prov_repo / "order_service.py").write_text(
+        'def fetch_order() -> dict:\n    return {"customer_id": "123", "total": 49.99, "display_name": "Ada"}\n',
+        encoding="utf-8",
+    )
+    _git(prov_repo, "add", ".")
+    _git(prov_repo, "commit", "-m", "Add optional display_name field")
+
+    # Consumer repo: customer = payload["customer_id"]
+    (cons_repo / "consumer_handler.py").write_text(
+        "def process_order(payload: dict) -> str:\n"
+        '    customer = payload["customer_id"]\n'
+        "    return customer\n",
+        encoding="utf-8",
+    )
+    (cons_repo / "test_order_integration.py").write_text(
+        "from order_service import fetch_order\n"
+        "from consumer_handler import process_order\n\n"
+        "def test_live_order_contract():\n"
+        "    assert process_order(fetch_order()) == '123'\n",
+        encoding="utf-8",
+    )
+    _git(cons_repo, "add", ".")
+    _git(cons_repo, "commit", "-m", "Add consumer handler and integration test")
+
+    # Configure local Gemma mode
+    monkeypatch.setenv("MERGEMESH_AI_MODE", "local")
+    monkeypatch.setenv("OLLAMA_MODEL", "gemma4:e4b")
+    settings = load_settings()
+
+    captured_adk_calls: list[dict] = []
+
+    async def fake_litellm_acompletion(model, messages, tools=None, **kwargs):
+        from litellm.types.utils import Choices, Message, ModelResponse, Usage
+
+        captured_adk_calls.append(
+            {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "kwargs": kwargs,
+            }
+        )
+        user_text = next(m["content"] for m in messages if m["role"] == "user")
+        if "feat/breaking-rename" in user_text or '"removed_fields": [\n      "customer_id"\n    ]' in user_text:
+            payload = {
+                "summary": "orders-provider renamed customer_id to customerId, breaking checkout-consumer.",
+                "compatibility_assessment": "checkout-consumer reads payload['customer_id'] directly on line 2, raising KeyError: 'customer_id'.",
+                "observed_facts": [
+                    "orders-provider removed customer_id and added customerId in order_response.json.",
+                    "checkout-consumer consumer_handler.py:2 accesses payload['customer_id'].",
+                ],
+                "why_it_matters": "Deploying orders-provider without updating checkout-consumer causes runtime order processing failures.",
+                "severity_label": "high",
+                "confidence_label": "high",
+                "hypotheses": ["customer_id was renamed to camelCase customerId with identical sample value '123'."],
+                "suggested_fix_options": [
+                    "Update consumer_handler.py to read payload.get('customerId') or payload['customer_id'].",
+                    "Dual-write both customer_id and customerId in orders-provider during migration.",
+                ],
+                "remediation_tradeoffs": "Updating checkout-consumer adopts the new schema directly, whereas dual-writing in orders-provider allows rolling zero-downtime deployment.",
+                "verification_plan": ["Run test_order_integration.py against the updated provider and consumer."],
+                "suggested_test": "assert process_order(fetch_order()) == '123'",
+                "limitations": ["Python AST analysis covers static string dictionary keys."],
+            }
+        else:
+            payload = {
+                "summary": "orders-provider added optional display_name while retaining customer_id and total.",
+                "compatibility_assessment": "Compatible additive change: checkout-consumer's required customer_id field remains intact.",
+                "observed_facts": [
+                    "orders-provider retained customer_id ('123') and total (49.99) and added display_name ('Ada').",
+                    "checkout-consumer consumer_handler.py:2 only reads payload['customer_id'].",
+                ],
+                "why_it_matters": "Existing consumer code paths continue to function without modification.",
+                "severity_label": "none",
+                "confidence_label": "high",
+                "hypotheses": ["checkout-consumer ignores unreferenced dictionary keys."],
+                "suggested_fix_options": ["No code change required."],
+                "remediation_tradeoffs": "Additive fields in JSON dictionaries do not require consumer changes.",
+                "verification_plan": ["Run existing consumer unit and integration checks."],
+                "suggested_test": None,
+                "limitations": ["Static analysis does not inspect strict schema validators rejecting extra keys."],
+            }
+
+        return ModelResponse(
+            id="chatcmpl-mergemesh-test",
+            choices=[
+                Choices(
+                    finish_reason="stop",
+                    index=0,
+                    message=Message(content=json.dumps(payload), role="assistant"),
+                )
+            ],
+            model=model,
+            usage=Usage(prompt_tokens=200, completion_tokens=120, total_tokens=320),
+        )
+
+    monkeypatch.setattr(
+        "agents.workflow.check_provider_readiness",
+        lambda s, timeout_sec=1.5: ProviderReadiness(
+            ollama_reachable=True,
+            ollama_model_installed=True,
+            ollama_available_models=["gemma4:e4b"],
+            ollama_status_message="Ollama ready (gemma4:e4b)",
+            gemini_configured=False,
+            gemini_backend="developer_api",
+            gemini_status_message="Not configured",
+        ),
+    )
+    monkeypatch.setattr("google.adk.models.lite_llm.acompletion", fake_litellm_acompletion)
+
+    # --- Scenario A: Breaking change (with approved integration test reproducing failure) ---
+    _git(prov_repo, "checkout", "feat/breaking-rename")
+    req_a = CustomRepoAnalysisRequest(
+        provider_repo_path=str(prov_repo),
+        consumer_repo_path=str(cons_repo),
+        provider_base_ref="main",
+        provider_target_ref="feat/breaking-rename",
+        provider_contract_path="order_response.json",
+        consumer_target_ref="HEAD",
+        user_approved_test_execution=True,
+        combined_test_rel_path="test_order_integration.py",
+    )
+    report_a = run_custom_repo_analysis(req_a, settings=settings)
+
+    assert len(captured_adk_calls) == 1
+    call_a = captured_adk_calls[0]
+    assert call_a["model"] == "ollama_chat/gemma4:e4b"
+    assert call_a["tools"] is None
+    assert call_a["kwargs"].get("response_format") == {"type": "json_object"}
+    assert call_a["messages"][0]["role"] == "system"
+    assert "customer_id" in call_a["messages"][1]["content"]
+    assert "consumer_handler.py" in call_a["messages"][1]["content"]
+
+    assert report_a.overall_status == "BREAKING_FAILURE_REPRODUCED"
+    assert report_a.finding_list[0].verification_state == "REPRODUCED_FAILURE"
+    assert report_a.ai_explanation.status == "SUCCESS"
+    assert report_a.ai_explanation.model == "ollama_chat/gemma4:e4b"
+    assert report_a.ai_explanation.severity_label == "high"
+    assert "dual-writing" in report_a.ai_explanation.remediation_tradeoffs
+    assert len(report_a.ai_explanation.verification_plan) >= 1
+    md_a = export_report_to_markdown(report_a)
+    assert "Gemma AI Reasoning & Remediation (`ollama_chat/gemma4:e4b`)" in md_a
+
+    # --- Scenario B: Compatible additive change (display_name added while retaining customer_id) ---
+    _git(prov_repo, "checkout", "feat/add-display-name")
+    req_b = CustomRepoAnalysisRequest(
+        provider_repo_path=str(prov_repo),
+        consumer_repo_path=str(cons_repo),
+        provider_base_ref="main",
+        provider_target_ref="feat/add-display-name",
+        provider_contract_path="order_response.json",
+        consumer_target_ref="HEAD",
+        user_approved_test_execution=False,
+    )
+    report_b = run_custom_repo_analysis(req_b, settings=settings)
+
+    assert len(captured_adk_calls) == 2
+    assert report_b.overall_status == "COMPATIBLE_PASS"
+    assert report_b.finding_list == []
+    assert "display_name" in report_b.contract_comparison.added_fields
+    assert report_b.ai_explanation.status == "SUCCESS"
+    assert report_b.ai_explanation.severity_label == "none"
+    assert "display_name" in report_b.ai_explanation.summary
+    assert any("not executed" in lim.lower() or "static" in lim.lower() for lim in report_b.ai_explanation.limitations)
+
+    # --- Scenario C: Model unavailable (controlled offline test) ---
+    monkeypatch.setattr(
+        "agents.workflow.check_provider_readiness",
+        lambda s, timeout_sec=1.5: ProviderReadiness(
+            ollama_reachable=False,
+            ollama_model_installed=False,
+            ollama_available_models=[],
+            ollama_status_message="Ollama service offline (http://localhost:11434) — deterministic fallback active",
+            gemini_configured=False,
+            gemini_backend="developer_api",
+            gemini_status_message="Not configured",
+            ollama_recovery_hint="Install Ollama, run `ollama serve`, and pull `gemma4:e4b`.",
+        ),
+    )
+    _git(prov_repo, "checkout", "feat/breaking-rename")
+    report_c = run_custom_repo_analysis(req_a, settings=settings)
+    assert report_c.overall_status == "BREAKING_FAILURE_REPRODUCED"
+    assert len(report_c.finding_list) == 1
+    assert report_c.ai_explanation.status == "FALLBACK"
+    assert "Deterministic Fallback" in report_c.ai_explanation.provider
+    assert "Recovery:" in (report_c.ai_explanation.fallback_reason or "")
+    md_c = export_report_to_markdown(report_c)
+    assert "Deterministic Fallback Assessment (`status=FALLBACK` — Not Model-Generated)" in md_c
+    assert "Gemma AI Reasoning & Remediation" not in md_c
+
