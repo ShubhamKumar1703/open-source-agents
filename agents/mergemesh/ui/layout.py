@@ -1,0 +1,372 @@
+"""Main Streamlit dashboard layout and tab views for MergeMesh."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+import streamlit as st
+
+from config.settings import AppSettings, check_provider_readiness
+from domain.models import AnalysisReport, ScenarioDefinition
+from services.report_export import (
+    export_report_to_json,
+    export_report_to_markdown,
+    save_report_artifacts,
+)
+from ui.components import (
+    render_dependency_graph,
+    render_finding_card,
+    render_header,
+    render_provider_readiness_sidebar,
+    render_test_result_block,
+)
+from ui.styles import DASHBOARD_CSS
+
+
+def _compute_run_status_label(report: AnalysisReport | None, error_msg: str | None) -> str:
+    if error_msg:
+        return "Error"
+    if report is None:
+        return "Ready"
+    if report.ai_explanation.status in {"FALLBACK", "UNAVAILABLE"}:
+        return "Completed with AI fallback"
+    return "Completed"
+
+
+def render_overview_tab(
+    report: AnalysisReport,
+    on_apply_fix: Callable[[], None],
+    on_switch_safe: Callable[[], None],
+) -> None:
+    """Render the Overview tab with summary cards, finding headline, dependency graph, and fix actions."""
+    isolated_tests = [t for t in report.test_results if t.test_kind in {"provider_isolated", "consumer_isolated"}]
+    isolated_passed = sum(1 for t in isolated_tests if t.status == "PASS")
+    combined_test = next((t for t in report.test_results if t.test_kind == "combined_integration"), None)
+    post_fix = report.post_fix_result
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(
+            f"""
+            <div class="mm-card">
+                <div class="mm-metric-label">Isolated PR Checks</div>
+                <div class="mm-metric-value" style="color:#4ade80;">{isolated_passed} / {len(isolated_tests)} Passed</div>
+                <div style="font-size:0.78rem; color:#94a3b8;">Consumer unit test uses mock</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col2:
+        comb_status = combined_test.status if combined_test else "NOT_RUN"
+        comb_color = "#f87171" if comb_status == "FAIL" else ("#4ade80" if comb_status == "PASS" else "#fbbf24")
+        st.markdown(
+            f"""
+            <div class="mm-card">
+                <div class="mm-metric-label">Combined Candidate Check</div>
+                <div class="mm-metric-value" style="color:{comb_color};">{comb_status}</div>
+                <div style="font-size:0.78rem; color:#94a3b8;">{combined_test.failure_summary if (combined_test and combined_test.failure_summary) else 'Live provider -> consumer'}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col3:
+        affected_consumers = len({f.consumer_repo for f in report.finding_list})
+        aff_color = "#f87171" if affected_consumers > 0 and not (post_fix and post_fix.status == "PASS") else "#4ade80"
+        st.markdown(
+            f"""
+            <div class="mm-card">
+                <div class="mm-metric-label">Consumers Affected</div>
+                <div class="mm-metric-value" style="color:{aff_color};">{affected_consumers} ({report.consumer_repo if affected_consumers else 'None'})</div>
+                <div style="font-size:0.78rem; color:#94a3b8;">{len(report.finding_list)} deterministic finding(s)</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col4:
+        pf_text = post_fix.status if post_fix else ("N/A (Compatible)" if not report.finding_list else "Not Run Yet")
+        pf_color = "#4ade80" if pf_text in {"PASS", "N/A (Compatible)"} else "#94a3b8"
+        st.markdown(
+            f"""
+            <div class="mm-card">
+                <div class="mm-metric-label">Post-Fix Verification</div>
+                <div class="mm-metric-value" style="color:{pf_color};">{pf_text}</div>
+                <div style="font-size:0.78rem; color:#94a3b8;">Deterministic runtime check</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if report.consumer_mock_note:
+        st.info(f"**Coverage Gap Note:** {report.consumer_mock_note}")
+
+    st.markdown("#### Compatibility Verdict & Findings")
+    if report.finding_list:
+        for f in report.finding_list:
+            render_finding_card(f, post_fix_result=report.post_fix_result)
+    else:
+        st.markdown(
+            f"""
+            <div class="mm-card-pass">
+                <strong>[VERIFIED COMPATIBLE] No Cross-Repository Contract Mismatches Detected</strong>
+                <p style="margin:0.4rem 0 0 0; color:#e2e8f0;">
+                    All isolated checks and the combined cross-repository check between
+                    <code>{report.provider_repo}</code> and <code>{report.consumer_repo}</code> executed and passed.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("#### Cross-Repository Dependency Relationship")
+    render_dependency_graph(report)
+
+    act_col1, act_col2 = st.columns(2)
+    with act_col1:
+        if report.finding_list and not (report.post_fix_result and report.post_fix_result.status == "PASS"):
+            if st.button(
+                "Verify Suggested Fix (Run Remediated Consumer Integration Check)",
+                type="primary",
+                use_container_width=True,
+            ):
+                on_apply_fix()
+        elif report.post_fix_result and report.post_fix_result.status == "PASS":
+            st.success(
+                f"Post-fix integration test (`{report.post_fix_result.file_path}`) executed and PASSED "
+                f"in {report.post_fix_result.duration_ms} ms."
+            )
+    with act_col2:
+        if report.scenario_id != "safe_optional_field":
+            if st.button("Switch to Scenario B (Compatible Optional Field)", use_container_width=True):
+                on_switch_safe()
+
+
+def render_pr_changes_tab(report: AnalysisReport, scenario: ScenarioDefinition) -> None:
+    """Render side-by-side synthetic PR diffs and source files."""
+    st.caption(
+        "Simulated PR Fixture Mode: The diffs below are loaded from local repository fixtures (`fixtures/scenarios/`). "
+        "No live GitHub URL was fetched."
+    )
+    col_a, col_b = st.columns(2)
+    provider_diff = next((d for d in report.diffs if d.repo == report.provider_repo), None)
+    consumer_diff = next((d for d in report.diffs if d.repo == report.consumer_repo), None)
+
+    with col_a:
+        st.markdown(f"#### PR A — `{report.provider_repo}` (Provider)")
+        st.markdown(f"**{report.pr_a_title}**")
+        if provider_diff:
+            st.caption(f"Fixture path: `fixtures/scenarios/{report.scenario_id}/{provider_diff.path}` (simulated PR fixture)")
+            if provider_diff.summary:
+                st.write(provider_diff.summary)
+            st.code(provider_diff.content, language="diff")
+
+    with col_b:
+        st.markdown(f"#### PR B — `{report.consumer_repo}` (Consumer)")
+        st.markdown(f"**{report.pr_b_title}**")
+        if consumer_diff:
+            st.caption(f"Fixture path: `fixtures/scenarios/{report.scenario_id}/{consumer_diff.path}` (simulated PR fixture)")
+            if consumer_diff.summary:
+                st.write(consumer_diff.summary)
+            st.code(consumer_diff.content, language="diff")
+
+    if scenario.post_fix_consumer_source:
+        with st.expander("View Suggested Consumer Remediation (`repos/checkout-client/client_fixed.py`)"):
+            fixed_path = Path(scenario.scenario_dir) / scenario.post_fix_consumer_source
+            if fixed_path.exists():
+                st.code(fixed_path.read_text(encoding="utf-8"), language="python")
+
+
+def render_contract_tab(report: AnalysisReport, scenario: ScenarioDefinition) -> None:
+    """Render dependency graph, before/after JSON contract comparison, and AST consumer accesses."""
+    st.markdown("#### Service Dependency Topology")
+    render_dependency_graph(report)
+
+    s_root = Path(scenario.scenario_dir)
+    before_json_col, after_json_col = st.columns(2)
+    with before_json_col:
+        st.markdown(f"**Provider Contract Before (`{report.contract_comparison.provider_before_path}`)**")
+        st.code((s_root / report.contract_comparison.provider_before_path).read_text(encoding="utf-8"), language="json")
+    with after_json_col:
+        st.markdown(f"**Provider Contract After (`{report.contract_comparison.provider_after_path}`)**")
+        st.code((s_root / report.contract_comparison.provider_after_path).read_text(encoding="utf-8"), language="json")
+
+    st.markdown("#### Deterministic Before / After Contract Field Comparison")
+    field_rows = []
+    for fc in report.contract_comparison.field_changes:
+        field_rows.append(
+            {
+                "Field Path": fc.field_path,
+                "Change Type": fc.change_type.upper(),
+                "Before Type": fc.before_type or "—",
+                "Before Sample": str(fc.before_value) if fc.before_value is not None else "—",
+                "After Type": fc.after_type or "—",
+                "After Sample": str(fc.after_value) if fc.after_value is not None else "—",
+                "Candidate Replacement": fc.replacement_candidate or "—",
+                "Compatibility Impact": fc.impact,
+            }
+        )
+    st.dataframe(field_rows, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Detected Consumer Field Accesses (Python AST Scanner)")
+    access_rows = []
+    for acc in report.consumer_accesses:
+        access_rows.append(
+            {
+                "Consumer Repo": acc.consumer_repo,
+                "Source File": acc.file_path,
+                "Line": acc.line,
+                "Accessed Field": acc.field_path,
+                "Access Style": acc.access_mode,
+                "Default Value Provided": "Yes" if acc.default_provided else "No",
+                "Measured Code Snippet": acc.code_snippet,
+            }
+        )
+    st.dataframe(access_rows, use_container_width=True, hide_index=True)
+    st.caption(
+        "Scope Note: The MVP deterministic analyzer extracts JSON response fields and scans Python AST dictionary "
+        "subscripts (`payload['key']`) and `.get('key')` calls."
+    )
+
+
+def render_test_evidence_tab(
+    report: AnalysisReport,
+    on_rerun_tests: Callable[[], None],
+    on_apply_fix: Callable[[], None],
+) -> None:
+    """Render executed test results, stdout/stderr logs, and report export actions."""
+    top_col1, top_col2, top_col3 = st.columns([2, 2, 3])
+    with top_col1:
+        if st.button("Run Allow-Listed Tests Again", use_container_width=True):
+            on_rerun_tests()
+    with top_col2:
+        if report.finding_list and not (report.post_fix_result and report.post_fix_result.status == "PASS"):
+            if st.button("Run Post-Fix Verification Check", type="primary", use_container_width=True):
+                on_apply_fix()
+    with top_col3:
+        json_str = export_report_to_json(report)
+        md_str = export_report_to_markdown(report)
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            st.download_button(
+                "Download JSON Report",
+                data=json_str,
+                file_name=f"mergemesh_{report.scenario_id}_report.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        with dl2:
+            st.download_button(
+                "Download Markdown Report",
+                data=md_str,
+                file_name=f"mergemesh_{report.scenario_id}_report.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
+
+    st.markdown("#### Executed Test Suite Results")
+    for tr in report.test_results:
+        render_test_result_block(tr)
+
+    if report.post_fix_result:
+        st.markdown("#### Post-Fix Remediated Execution Result")
+        render_test_result_block(report.post_fix_result)
+
+    if report.finding_list:
+        st.markdown("#### Measured Evidence Records")
+        ev_rows = []
+        for f in report.finding_list:
+            for ev in f.evidence:
+                ev_rows.append(
+                    {
+                        "Evidence ID": ev.evidence_id,
+                        "Kind": ev.kind,
+                        "Repository": ev.repo or "—",
+                        "File Path": ev.path or "—",
+                        "Line": str(ev.line) if ev.line is not None else "—",
+                        "Exit Code": str(ev.exit_code) if ev.exit_code is not None else "—",
+                        "Measured Detail": ev.detail,
+                    }
+                )
+        st.dataframe(ev_rows, use_container_width=True, hide_index=True)
+
+
+def render_ai_explanation_tab(
+    report: AnalysisReport,
+    on_regenerate_ai: Callable[[], None],
+) -> None:
+    """Render the AI Explanation tab with clear separation between measured facts and model output."""
+    ai = report.ai_explanation
+
+    if ai.status in {"FALLBACK", "UNAVAILABLE"}:
+        st.info(
+            f"**AI explanation unavailable; compatibility findings and test evidence are still valid.**\n\n"
+            f"- **Active Provider Path:** `{ai.provider}` (`status={ai.status}`)\n"
+            f"- **Reason:** {ai.fallback_reason or 'Local Ollama or hosted Gemini credentials not available.'}\n"
+            f"- **Displayed Below:** Deterministic ground-truth explanation synthesized directly from measured AST and test evidence."
+        )
+    else:
+        st.success(
+            f"**AI Explanation Generated via Google ADK** — Provider: `{ai.provider}` | "
+            f"Model: `{ai.model}` | Duration: `{ai.duration_ms} ms`"
+        )
+
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        st.markdown("#### Measured Evidence (Deterministic Ground Truth)")
+        st.markdown(
+            """
+            <div class="mm-card">
+                <div class="mm-metric-label">Authority Notice</div>
+                <div style="font-size:0.9rem; color:#e2e8f0;">
+                    Deterministic Python contract comparators, AST scanners, and the allow-listed pytest runner
+                    establish the compatibility verdict. AI never overrides test results.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("**Observed Facts (Backed by Fixture Paths & Executed Tests):**")
+        for fact in ai.observed_facts:
+            st.markdown(f"- {fact}")
+
+        if report.source_hashes:
+            with st.expander("View Input Fixture SHA-256 Hashes"):
+                st.json(report.source_hashes)
+
+    with col_right:
+        st.markdown("#### AI Interpretation & Remediation Options")
+        st.markdown(
+            f"""
+            <div class="mm-ai-box">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span class="mm-badge mm-badge-info">Provider: {ai.provider}</span>
+                    <span class="mm-badge mm-badge-fixture">Confidence: {ai.confidence_label.upper()}</span>
+                </div>
+                <h5 style="margin:0.75rem 0 0.35rem 0; color:#f8fafc;">Summary</h5>
+                <p style="font-size:0.93rem; color:#e2e8f0;">{ai.summary}</p>
+                <h5 style="margin:0.75rem 0 0.35rem 0; color:#f8fafc;">Why It Matters</h5>
+                <p style="font-size:0.93rem; color:#cbd5e1;">{ai.why_it_matters}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if ai.hypotheses:
+            st.markdown("**Inferred Hypotheses (Candidate Mappings):**")
+            for hyp in ai.hypotheses:
+                st.markdown(f"- *(Inference)* {hyp}")
+
+        st.markdown("**Suggested Fix Options (For Engineer Review):**")
+        for opt in ai.suggested_fix_options:
+            st.markdown(f"- {opt}")
+
+        if ai.suggested_test:
+            st.markdown("**Suggested Targeted Contract Test (Text Suggestion Only — Not Auto-Executed):**")
+            st.code(ai.suggested_test, language="python")
+
+        if ai.limitations:
+            st.caption("**Limitations & Scope:** " + " | ".join(ai.limitations))
+
+        if st.button("Regenerate Explanation", use_container_width=True):
+            on_regenerate_ai()
